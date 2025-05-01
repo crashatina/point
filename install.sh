@@ -8,25 +8,22 @@ function generateServerConfig() {
     echo "Обновление системы..."
     pacman -Suy --noconfirm
 
-    # Установка wget, mc, base-devel и linux-headers
-    echo "Установка wget, mc, base-devel и linux-headers..."
-    pacman -S wget mc base-devel linux-headers --noconfirm
+    # Установка необходимых пакетов
+    echo "Установка wget, git, mc, base-devel и linux-headers..."
+    pacman -S wget git mc base-devel linux-headers bash-completion vim make qrencode --noconfirm
 
-    # Загрузка архива point.tar.gz
-    echo "Загрузка архива point.tar.gz..."
-    wget https://github.com/crashatina/point/releases/download/Point/point.tar.gz
-
-    # Распаковка архива в корень /
-    echo "Распаковка архива в корень /..."
-    tar -xzvf point.tar.gz -C /
-
-    # Обновление зависимостей модулей ядра
-    echo "Обновление зависимостей модулей ядра..."
-    depmod -a
-
-    # Загрузка модуля amneziawg
-    echo "Загрузка модуля amneziawg..."
-    modprobe amneziawg
+    # Установка amneziawg из AUR
+    echo "Установка amneziawg-linux..."
+    git clone https://aur.archlinux.org/amneziawg-linux.git
+    cd amneziawg-linux
+    makepkg -si --noconfirm --syncdeps
+    cd ..
+    
+    echo "Установка amneziawg-tools..."
+    git clone https://aur.archlinux.org/amneziawg-tools.git
+    cd amneziawg-tools/
+    makepkg -si --noconfirm --syncdeps
+    cd ..
 
     # Определение публичного IP-адреса и сетевого интерфейса
     SERVER_PUB_IP=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | awk '{print $1}' | head -1)
@@ -316,19 +313,58 @@ function revokeClient() {
     echo "awg-quick перезапущен для применения изменений."
 }
 
+function generateQRCode() {
+    if [[ ! -f "${SERVER_AWG_CONF}" ]]; then
+        echo "Сервер не настроен!"
+        exit 1
+    fi
 
+    listClients
+
+    CLIENT_NUMBER=""
+    until [[ ${CLIENT_NUMBER} =~ ^[0-9]+$ && ${CLIENT_NUMBER} -ge 1 && ${CLIENT_NUMBER} -le $(grep -c "^### Client" "${SERVER_AWG_CONF}") ]]; do
+        read -rp "Выберите клиента для генерации QR-кода: " CLIENT_NUMBER
+    done
+
+    CLIENT_NAME=$(grep -E "^### Client" "${SERVER_AWG_CONF}" | cut -d ' ' -f 3 | sed -n "${CLIENT_NUMBER}"p)
+    CLIENT_CONFIG="/root/awg0-client-${CLIENT_NAME}.conf"
+
+    if [[ ! -f "${CLIENT_CONFIG}" ]]; then
+        echo "Конфигурационный файл клиента не найден!"
+        exit 1
+    fi
+
+    echo "Генерация QR-кода для клиента ${CLIENT_NAME}..."
+    
+    # Генерация QR-кода с увеличенными параметрами
+    qrencode -t ansiutf8 < "${CLIENT_CONFIG}"
+    qrencode -o "${CLIENT_CONFIG}.png" \
+             -s 12 \
+             -m 6 \
+             -l H \
+             -d 300 \
+             < "${CLIENT_CONFIG}"
+    
+    echo "QR-код сохранен как: ${CLIENT_CONFIG}.png"
+    echo "Размер файла: $(du -h "${CLIENT_CONFIG}.png" | cut -f1)"
+    echo "Разрешение: $(file "${CLIENT_CONFIG}.png" | grep -o '[0-9]* x [0-9]*')"
+}
 
 function removeAmneziaWG() {
-# Остановка и отключение iptables
-sudo systemctl stop iptables
-sudo systemctl disable iptables
+    # Остановка и отключение iptables
+    systemctl stop iptables
+    systemctl disable iptables
 
-# Остановка и отключение WireGuard (awg-quick@awg0)
-sudo systemctl stop awg-quick@awg0
-sudo systemctl disable awg-quick@awg0
+    # Остановка и отключение AmneziaWG
+    systemctl stop "awg-quick@${SERVER_AWG_NIC}"
+    systemctl disable "awg-quick@${SERVER_AWG_NIC}"
 
-# Создание файла iptables.rules с базовыми правилами
-sudo cat <<EOF > /etc/iptables/iptables.rules
+    # Удаление пакетов AmneziaWG
+    echo "Удаление пакетов AmneziaWG..."
+    pacman -Rns --noconfirm amneziawg-linux amneziawg-tools
+
+    # Создание файла iptables.rules с базовыми правилами
+    cat <<EOF > /etc/iptables/iptables.rules
 *nat
 :PREROUTING ACCEPT
 :INPUT ACCEPT
@@ -349,31 +385,20 @@ COMMIT
 COMMIT
 EOF
 
-# Удаление папок
-sudo rm -rf /etc/amnezia
-sudo rm -rf /usr/lib/modules/6.13.4-arch1-1/kernel/drivers/net/wireguard/
+    # Удаление папок
+    rm -rf /etc/amnezia
+    rm -rf /usr/lib/modules/*/kernel/drivers/net/wireguard/
 
-# Удаление файлов
-sudo rm -f /usr/share/man/man8/awg.8.gz
-sudo rm -f /usr/share/man/man8/awg-quick.8.gz
-sudo rm -f /usr/share/bash-completion/completions/awg-quick
-sudo rm -f /usr/share/bash-completion/completions/awg
-sudo rm -f /usr/lib/systemd/system/awg-quick.target
-sudo rm -f /usr/lib/systemd/system/awg-quick@.service
-sudo rm -f /usr/bin/awg-quick
-sudo rm -f /usr/bin/awg
+    # Удаление файлов конфигурации
+    rm -f /etc/sysctl.d/awg.conf
+    sysctl --system
 
-# Удаление файла awg.conf и перезапуск sysctl
-sudo rm -f /etc/sysctl.d/awg.conf
-sudo sysctl --system
+    # Перезагрузка демонов systemd
+    systemctl daemon-reload
 
-# Перезагрузка демонов systemd
-sudo systemctl daemon-reload
-
-echo "Сервисы остановлены, отключены, созданы базовые правила iptables, удалены папки и файлы, sysctl перезапущен, демоны перезагружены. AmneziaWG Полностью удалена."
-exit 0
+    echo "AmneziaWG полностью удалена со всеми конфигурациями и зависимостями."
+    exit 0
 }
-
 
 function showMenu() {
     echo "AmneziaWG Configurator"
@@ -383,10 +408,11 @@ function showMenu() {
     echo "   2) Создать нового Клиента"
     echo "   3) Лист клиентов"
     echo "   4) Удалить Клиента"
-    echo "   5) Удаление Сервера"
-	echo "   6) Выйти"
-    until [[ ${MENU_OPTION} =~ ^[1-5]$ ]]; do
-        read -rp "Select an option [1-5]: " MENU_OPTION
+    echo "   5) Генерация QR-кода"
+    echo "   6) Удаление Сервера"
+    echo "   7) Выйти"
+    until [[ ${MENU_OPTION} =~ ^[1-7]$ ]]; do
+        read -rp "Select an option [1-7]: " MENU_OPTION
     done
     case "${MENU_OPTION}" in
         1)
@@ -402,9 +428,12 @@ function showMenu() {
             revokeClient
             ;;
         5)
+            generateQRCode
+            ;;
+        6)
             removeAmneziaWG
             ;;
-		6)
+        7)
             exit 0
             ;;
     esac
