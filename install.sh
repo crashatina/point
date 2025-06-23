@@ -5,8 +5,8 @@ SERVER_AWG_CONF="${AMNEZIAWG_DIR}/awg0.conf"
 
 function generateServerConfig() {
     # Обновление системы
-    echo "Обновление системы..."
-    pacman -Suy --noconfirm
+    #echo "Обновление системы..."
+    #pacman -Suy --noconfirm
 
     # Установка необходимых пакетов
     echo "Установка wget, git, mc, base-devel и linux-headers..."
